@@ -13,12 +13,18 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState("./session")
   const { version } = await fetchLatestBaileysVersion()
 
-  const sock = makeWASocket({
-    logger: P({ level: "silent" }),
-    printQRInTerminal: true,
-    auth: state,
-    version
-  })
+const sock = makeWASocket({
+  logger: P({ level: "silent" }),
+  auth: state,
+  version
+})
+
+sock.ev.on("connection.update", ({ qr }) => {
+  if (qr) {
+    console.log("📌 Scan this QR code in WhatsApp:")
+    console.log(qr)
+  }
+})
 
   sock.ev.on("creds.update", saveCreds)
 
