@@ -2,76 +2,83 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  downloadContentFromMessage
 } = require("@whiskeysockets/baileys")
-
 const P = require("pino")
 const fs = require("fs")
 const ytdl = require("ytdl-core")
+const qrcode = require("qrcode-terminal") // for QR image in logs
 
-async function start() {
+async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("./session")
   const { version } = await fetchLatestBaileysVersion()
 
-const sock = makeWASocket({
-  logger: P({ level: "silent" }),
-  auth: state,
-  version
-})
+  const sock = makeWASocket({
+    logger: P({ level: "silent" }),
+    auth: state,
+    version,
+    qrTimeout: 600_000 // ✅ QR valid for 10 mins
+  })
 
-sock.ev.on("connection.update", ({ qr }) => {
-  if (qr) {
-    console.log("📌 Scan this QR code in WhatsApp:")
-    console.log(qr)
-  }
-})
+  // ✅ QR handler
+  sock.ev.on("connection.update", ({ qr }) => {
+    if (qr) {
+      console.log("📌 Scan this QR code with WhatsApp:")
+      qrcode.generate(qr, { small: true }) // shows scannable QR in logs
+    }
+  })
 
   sock.ev.on("creds.update", saveCreds)
 
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const m = messages[0]
     if (!m.message || m.key.fromMe) return
-    const from = m.key.remoteJid
-    const text =
-      m.message.conversation ||
-      m.message.extendedTextMessage?.text ||
-      ""
 
-    // ✅ Save view-once
-    if (m.message?.viewOnceMessage) {
-      const msg = m.message.viewOnceMessage.message
-      const type = Object.keys(msg)[0]
-      const stream = await downloadContentFromMessage(msg[type], type.replace("Message", ""))
-      let buffer = Buffer.from([])
-      for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk])
-      const filePath = `./viewonce_${Date.now()}.jpg`
-      fs.writeFileSync(filePath, buffer)
-      await sock.sendMessage(from, { text: "✅ View-once saved!" })
-      await sock.sendMessage(from, { image: fs.readFileSync(filePath) })
+    const from = m.key.remoteJid
+    const type = Object.keys(m.message)[0]
+    const body =
+      type === "conversation"
+        ? m.message.conversation
+        : type === "extendedTextMessage"
+        ? m.message.extendedTextMessage.text
+        : ""
+
+    // ✅ Ping test
+    if (body === "!ping") {
+      await sock.sendMessage(from, { text: "🏓 Pong!" })
     }
 
     // ✅ YouTube downloader
-    if (text.startsWith("!yt ")) {
-      const url = text.split(" ")[1]
+    if (body.startsWith("!yt ")) {
+      const url = body.split(" ")[1]
       if (!ytdl.validateURL(url)) {
-        return sock.sendMessage(from, { text: "❌ Invalid YouTube URL" })
+        await sock.sendMessage(from, { text: "❌ Invalid YouTube URL" })
+        return
       }
-      const path = `./yt_${Date.now()}.mp4`
-      ytdl(url, { filter: "audioandvideo", quality: "lowest" })
-        .pipe(fs.createWriteStream(path))
-        .on("finish", async () => {
-          await sock.sendMessage(from, {
-            video: fs.readFileSync(path),
-            caption: "🎥 Here’s your video"
-          })
+      const info = await ytdl.getInfo(url)
+      const title = info.videoDetails.title
+      const stream = ytdl(url, { filter: "audioonly" })
+      const filePath = "./yt.mp3"
+
+      const writeStream = fs.createWriteStream(filePath)
+      stream.pipe(writeStream)
+
+      writeStream.on("finish", async () => {
+        await sock.sendMessage(from, {
+          audio: { url: filePath },
+          mimetype: "audio/mp4",
+          ptt: true,
         })
+        fs.unlinkSync(filePath)
+      })
     }
 
-    // ✅ Simple test
-    if (text === "!ping") {
-      await sock.sendMessage(from, { text: "🏓 Pong!" })
+    // ✅ View-once bypass
+    if (m.message?.viewOnceMessageV2) {
+      const msg = m.message.viewOnceMessageV2.message
+      const type = Object.keys(msg)[0]
+      await sock.sendMessage(from, { [type]: msg[type] })
     }
   })
 }
 
-start()
+startBot()
